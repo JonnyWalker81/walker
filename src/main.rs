@@ -1,5 +1,7 @@
 use std::{
-    io, panic,
+    io::{self, SeekFrom},
+    panic,
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -18,9 +20,10 @@ use tui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Span, Spans},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs, Wrap},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Tabs, Wrap},
     Frame, Terminal,
 };
+use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
 #[clap(version = "1.0", author = "Jonathan Rothberg")]
@@ -70,23 +73,15 @@ async fn run_ui() -> Result<()> {
         tokio::sync::mpsc::channel(1);
 
     let mut app = App::new();
+    let current_dir = std::env::current_dir()?;
+    app.set_current_dir(&current_dir.display().to_string());
+    let mut table_state = TableState::default();
+    table_state.select(Some(0));
+    app.set_directory_table_state(table_state);
 
     loop {
         terminal.draw(|rect| {
-            let size = rect.size();
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(2)
-                .constraints(
-                    [
-                        Constraint::Length(3),
-                        Constraint::Min(2),
-                        Constraint::Length(3),
-                    ]
-                    .as_ref(),
-                )
-                .split(size);
-            draw(rect, &mut app);
+            let _ = draw(rect, &mut app);
         });
 
         tokio::select! {
@@ -99,6 +94,10 @@ async fn run_ui() -> Result<()> {
                            terminal.show_cursor()?;
                            break;
                         },
+                        KeyCode::Down | KeyCode::Char('j') => app.move_selection_down(),
+                        KeyCode::Up | KeyCode::Char('k') => app.move_selection_up(),
+                        KeyCode::Right | KeyCode::Char('l') => app.move_into_child_dir(),
+                        KeyCode::Left | KeyCode::Char('h') => app.move_upto_parent_dir(),
                         _ => {}
                     }
                     Event::Tick => {}
@@ -143,15 +142,90 @@ fn start_key_events() -> tokio::sync::mpsc::Receiver<Event<KeyEvent>> {
     rx
 }
 
-struct App {}
+struct App {
+    current_dir: String,
+    directory_table_state: TableState,
+    current_contents: Vec<String>,
+}
 
 impl App {
     fn new() -> Self {
-        Self {}
+        Self {
+            current_dir: String::new(),
+            directory_table_state: TableState::default(),
+            current_contents: vec![],
+        }
+    }
+
+    fn set_current_dir(&mut self, dir: &str) {
+        self.current_dir = dir.to_string();
+        self.load_dir();
+    }
+
+    fn set_directory_table_state(&mut self, state: TableState) {
+        self.directory_table_state = state;
+    }
+
+    fn load_dir(&mut self) -> Result<()> {
+        self.current_contents = get_contents(&self.current_dir)?;
+        Ok(())
+    }
+
+    fn move_selection_up(&mut self) {
+        if let Some(selected) = self.directory_table_state.selected() {
+            if selected > 0 {
+                self.directory_table_state.select(Some(selected - 1));
+            } else {
+                self.directory_table_state
+                    .select(Some(self.current_contents.len() - 1));
+            }
+        }
+    }
+
+    fn move_selection_down(&mut self) {
+        if let Some(selected) = self.directory_table_state.selected() {
+            if selected >= self.current_contents.len() - 1 {
+                self.directory_table_state.select(Some(0));
+            } else {
+                self.directory_table_state.select(Some(selected + 1));
+            }
+        }
+    }
+
+    fn move_into_child_dir(&mut self) {
+        if let Some(idx) = self.directory_table_state.selected() {
+            if let Some(name) = self.current_contents.get(idx) {
+                let full_path = Path::new(&self.current_dir).join(name);
+                self.set_current_dir(&full_path.display().to_string());
+            }
+        }
+    }
+
+    fn move_upto_parent_dir(&mut self) {
+        if let Some(idx) = self.directory_table_state.selected() {
+            if let Some(parent) = Path::new(&self.current_dir.clone()).parent() {
+                self.set_current_dir(&parent.display().to_string());
+            }
+        }
     }
 }
 
-fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) {
+fn get_contents(path: &str) -> Result<Vec<String>> {
+    // for f in WalkDir::new(path).max_depth(0) {
+    //     contents.push(f?.path().display().to_string());
+    // }
+
+    // FIXME: Remove use of unwrap
+    let contents = WalkDir::new(path)
+        .max_depth(1)
+        .into_iter()
+        .map(|f| f.unwrap().path().display().to_string())
+        .skip(1)
+        .collect();
+    Ok(contents)
+}
+
+fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) -> Result<()> {
     let chunks = Layout::default()
         .constraints(
             [
@@ -162,9 +236,14 @@ fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) {
             .as_ref(),
         )
         .split(f.size());
-    let titles = vec!["Test"]
+    let titles = vec![app.current_dir.as_str()]
         .iter()
-        .map(|t| Spans::from(Span::styled(*t, Style::default().fg(Color::Green))))
+        .map(|t| {
+            Spans::from(Span::styled(
+                t.to_string(),
+                Style::default().fg(Color::Green),
+            ))
+        })
         .collect();
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::ALL).title("Walker"))
@@ -172,42 +251,25 @@ fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) {
         .select(0);
     f.render_widget(tabs, chunks[0]);
 
-    let files = vec!["foo.rs", "bar.toml", "baz.go"];
-    let rows: Vec<_> = files
+    let rows: Vec<_> = app
+        .current_contents
         .iter()
         .map(|f| Row::new(vec![Cell::from(Span::raw(f.to_string()))]))
         .collect();
 
-    let file_table = Table::new(rows).widths(&[Constraint::Percentage(100)]);
-    f.render_widget(file_table, chunks[1]);
+    let file_table = Table::new(rows)
+        .widths(&[Constraint::Percentage(100)])
+        .highlight_style(
+            Style::default()
+                .bg(Color::Green)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
+    f.render_stateful_widget(file_table, chunks[1], &mut app.directory_table_state);
 
-    let text = vec![
-        Spans::from("This is a paragraph with several lines. You can change style your text the way you want"),
-        Spans::from(""),
-        Spans::from(vec![
-            Span::from("For example: "),
-            Span::styled("under", Style::default().fg(Color::Red)),
-            Span::raw(" "),
-            Span::styled("the", Style::default().fg(Color::Green)),
-            Span::raw(" "),
-            Span::styled("rainbow", Style::default().fg(Color::Blue)),
-            Span::raw("."),
-        ]),
-        Spans::from(vec![
-            Span::raw("Oh and if you didn't "),
-            Span::styled("notice", Style::default().add_modifier(Modifier::ITALIC)),
-            Span::raw(" you can "),
-            Span::styled("automatically", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-            Span::styled("wrap", Style::default().add_modifier(Modifier::REVERSED)),
-            Span::raw(" your "),
-            Span::styled("text", Style::default().add_modifier(Modifier::UNDERLINED)),
-            Span::raw(".")
-        ]),
-        Spans::from(
-            "One more thing is that it should display unicode characters: 10€"
-        ),
-    ];
+    let text = vec![Spans::from(
+        "This is a paragraph with several lines. You can change style your text the way you want",
+    )];
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
         "Footer",
         Style::default()
@@ -222,4 +284,5 @@ fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) {
     //     2 => draw_third_tab(f, app, chunks[1]),
     //     _ => {}
     // };
+    Ok(())
 }
