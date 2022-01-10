@@ -13,3 +13,5 @@ tokio = { version = "0.2.21", features = ["full"] }
 tui = { version = "0.16", default-features = false, features = ['crossterm', 'serde'] }
 walkdir = "2.3.2"
 chrono = { version = "0.4", features = ["serde"] }
+tui-input = "0.1.2"
+unicode-width = "0.1.9"

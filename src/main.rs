@@ -25,6 +25,10 @@ use tui::{
 };
 use walkdir::WalkDir;
 
+use tui_input::backend::crossterm as input_backend;
+use tui_input::{Input, InputResponse, StateChanged};
+use unicode_width::UnicodeWidthStr;
+
 #[derive(Parser, Debug)]
 #[clap(version = "1.0", author = "Jonathan Rothberg")]
 struct Args {
@@ -86,8 +90,12 @@ async fn run_ui() -> Result<()> {
 
         tokio::select! {
             Some(event) = rx.recv() =>{
+
                 match event {
-                    Event::Input(event) => match event.code {
+                    Event::Input(event) =>
+                        match app.input_mode {
+                            InputMode::Normal => {
+                        match event.code {
                         KeyCode::Char('q') => {
                            disable_raw_mode()?;
                            io::stdout().execute(LeaveAlternateScreen)?;
@@ -98,8 +106,36 @@ async fn run_ui() -> Result<()> {
                         KeyCode::Up | KeyCode::Char('k') => app.move_selection_up(),
                         KeyCode::Right | KeyCode::Char('l') => app.move_into_child_dir(),
                         KeyCode::Left | KeyCode::Char('h') => app.move_upto_parent_dir(),
+                        KeyCode::Char('r') => app.start_rename_file(),
                         _ => {}
                     }
+                            }
+                            InputMode::Editing(ref _kind) => {
+                                match event.code {
+                                KeyCode::Esc => app.set_input_mode(InputMode::Normal),
+                                _ => {
+                                    let resp = input_backend::to_input_request(CEvent::Key(event))
+                                    .and_then(|req| app.text_input.handle(req));
+
+                    match resp {
+                        Some(InputResponse::StateChanged(_)) => {}
+                        Some(InputResponse::Submitted) => {
+                            match _kind {
+                                EditingKind::Rename => {
+                                app.rename_file();
+                                }
+                            }
+                        }
+
+                        Some(InputResponse::Escaped) => {
+                            app.input_mode = InputMode::Normal;
+                        }
+                        None => {}
+                    }
+                                }
+                                }
+                            }
+                        }
                     Event::Tick => {}
                 }
             }
@@ -142,10 +178,27 @@ fn start_key_events() -> tokio::sync::mpsc::Receiver<Event<KeyEvent>> {
     rx
 }
 
+#[derive(Clone, Debug)]
+enum EditingKind {
+    Rename,
+}
+
+#[derive(Clone, Debug)]
+enum InputMode {
+    Normal,
+    Editing(EditingKind),
+}
+
+#[derive(Debug)]
 struct App {
     current_dir: String,
     directory_table_state: TableState,
     current_contents: Vec<String>,
+    is_editing: bool,
+    file_to_edit: String,
+    editing_index: usize,
+    input_mode: InputMode,
+    text_input: Input,
 }
 
 impl App {
@@ -154,12 +207,20 @@ impl App {
             current_dir: String::new(),
             directory_table_state: TableState::default(),
             current_contents: vec![],
+            is_editing: false,
+            file_to_edit: String::new(),
+            editing_index: 0,
+            input_mode: InputMode::Normal,
+            text_input: Input::default(),
         }
     }
 
     fn set_current_dir(&mut self, dir: &str) {
-        self.current_dir = dir.to_string();
-        self.load_dir();
+        let path = Path::new(dir);
+        if path.is_dir() {
+            self.current_dir = dir.to_string();
+            self.load_dir();
+        }
     }
 
     fn set_directory_table_state(&mut self, state: TableState) {
@@ -197,6 +258,7 @@ impl App {
             if let Some(name) = self.current_contents.get(idx) {
                 let full_path = Path::new(&self.current_dir).join(name);
                 self.set_current_dir(&full_path.display().to_string());
+                self.directory_table_state.select(Some(0));
             }
         }
     }
@@ -205,8 +267,43 @@ impl App {
         if let Some(idx) = self.directory_table_state.selected() {
             if let Some(parent) = Path::new(&self.current_dir.clone()).parent() {
                 self.set_current_dir(&parent.display().to_string());
+                self.directory_table_state.select(Some(0));
             }
         }
+    }
+
+    fn start_rename_file(&mut self) {
+        self.is_editing = true;
+        if let Some(idx) = self.directory_table_state.selected() {
+            if let Some(selected_file) = self.current_contents.get(idx) {
+                let path = Path::new(&selected_file);
+                self.file_to_edit = selected_file.clone();
+                self.input_mode = InputMode::Editing(EditingKind::Rename);
+                self.text_input = self
+                    .text_input
+                    .clone()
+                    .with_value(self.file_to_edit.clone());
+            }
+        }
+    }
+
+    fn set_input_mode(&mut self, input_mode: InputMode) {
+        match input_mode {
+            InputMode::Normal => {
+                self.file_to_edit = String::new();
+                self.input_mode = input_mode;
+                self.is_editing = false;
+            }
+            InputMode::Editing(_) => {}
+        }
+    }
+
+    fn rename_file(&mut self) {
+        let name: String = self.text_input.value().into();
+        std::fs::rename(&self.file_to_edit, &name);
+        self.set_input_mode(InputMode::Normal);
+        self.directory_table_state.select(Some(0));
+        self.load_dir();
     }
 }
 
@@ -217,6 +314,7 @@ fn get_contents(path: &str) -> Result<Vec<String>> {
 
     // FIXME: Remove use of unwrap
     let contents = WalkDir::new(path)
+        .sort_by_file_name()
         .max_depth(1)
         .into_iter()
         .map(|f| f.unwrap().path().display().to_string())
@@ -267,17 +365,52 @@ fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) -> Result<()> {
         );
     f.render_stateful_widget(file_table, chunks[1], &mut app.directory_table_state);
 
-    let text = vec![Spans::from(
-        "This is a paragraph with several lines. You can change style your text the way you want",
-    )];
-    let block = Block::default().borders(Borders::ALL).title(Span::styled(
-        "Footer",
-        Style::default()
-            .fg(Color::Magenta)
-            .add_modifier(Modifier::BOLD),
-    ));
-    let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
-    f.render_widget(paragraph, chunks[2]);
+    let width = chunks[0].width.max(3) - 3; // keep 2 for borders and 1 for cursor
+    let scroll = (app.text_input.cursor() as u16).max(width) - width;
+    if app.is_editing {
+        // let text = vec![Spans::from(app.file_to_edit.clone())];
+        let input = Paragraph::new(app.text_input.value())
+            .style(match app.input_mode {
+                InputMode::Normal => Style::default(),
+                InputMode::Editing(_) => Style::default().fg(Color::Yellow),
+            })
+            .scroll((0, scroll))
+            .block(Block::default().borders(Borders::ALL).title("Rename"));
+        // let block = Block::default().borders(Borders::ALL).title(Span::styled(
+        //     "Rename",
+        //     Style::default()
+        //         .fg(Color::Magenta)
+        //         .add_modifier(Modifier::BOLD),
+        // ));
+        // f.render_widget(paragraph, chunks[2]);
+        f.render_widget(input, chunks[2]);
+    } else {
+        let text = vec![Spans::from("")];
+        let block = Block::default().borders(Borders::ALL).title(Span::styled(
+            "Normal",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let paragraph = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
+        f.render_widget(paragraph, chunks[2]);
+    }
+
+    match app.input_mode {
+        InputMode::Normal =>
+            // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
+            {}
+
+        InputMode::Editing(_) => {
+            // Make the cursor visible and ask tui-rs to put it at the specified coordinates after rendering
+            f.set_cursor(
+                // Put cursor past the end of the input text
+                chunks[2].x + (app.text_input.cursor() as u16).min(width) + 1,
+                // Move one line down, from the border to the input line
+                chunks[2].y + 1,
+            )
+        }
+    }
     // match app.tabs.index {
     //     0 => draw_first_tab(f, app, chunks[1]),
     //     1 => draw_second_tab(f, app, chunks[1]),
