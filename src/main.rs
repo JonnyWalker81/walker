@@ -1,5 +1,7 @@
+use humansize::{file_size_opts as options, FileSize};
 use std::{
     io::{self, SeekFrom},
+    os::unix::prelude::{CommandExt, PermissionsExt},
     panic,
     path::Path,
     time::{Duration, Instant},
@@ -91,49 +93,47 @@ async fn run_ui() -> Result<()> {
 
         tokio::select! {
             Some(event) = rx.recv() =>{
-
                 match event {
                     Event::Input(event) =>
                         match app.input_mode() {
                             InputMode::Normal => {
-                        match event.code {
-                        KeyCode::Char('q') => {
-                           disable_raw_mode()?;
-                           io::stdout().execute(LeaveAlternateScreen)?;
-                           terminal.show_cursor()?;
-                           break;
-                        },
-                        KeyCode::Down | KeyCode::Char('j') => app.move_selection_down(),
-                        KeyCode::Up | KeyCode::Char('k') => app.move_selection_up(),
-                        KeyCode::Right | KeyCode::Char('l') => app.move_into_child_dir(),
-                        KeyCode::Left | KeyCode::Char('h') => app.move_upto_parent_dir(),
-                        KeyCode::Char('r') => app.start_rename_file(),
-                        _ => {}
-                    }
+                                match event.code {
+                                    KeyCode::Char('q') => {
+                                        disable_raw_mode()?;
+                                        io::stdout().execute(LeaveAlternateScreen)?;
+                                        terminal.show_cursor()?;
+                                            break;
+                                    },
+                                    KeyCode::Down | KeyCode::Char('j') => app.move_selection_down(),
+                                    KeyCode::Up | KeyCode::Char('k') => app.move_selection_up(),
+                                    KeyCode::Right | KeyCode::Char('l') => app.move_into_child_dir(),
+                                    KeyCode::Left | KeyCode::Char('h') => app.move_upto_parent_dir(),
+                                    KeyCode::Char('r') => app.start_rename_file(),
+                                    KeyCode::Char('y') => app.initiate_file_copy(),
+                                    _ => {}
+                                }
                             }
                             InputMode::Editing(ref _kind) => {
                                 match event.code {
-                                KeyCode::Esc => app.set_input_mode(InputMode::Normal),
-                                _ => {
-                                    let resp = input_backend::to_input_request(CEvent::Key(event))
-                                    .and_then(|req| app.text_input_mut().handle(req));
+                                    KeyCode::Esc => app.set_input_mode(InputMode::Normal),
+                                    _ => {
+                                        let resp = input_backend::to_input_request(CEvent::Key(event))
+                                        .and_then(|req| app.text_input_mut().handle(req));
 
-                    match resp {
-                        Some(InputResponse::StateChanged(_)) => {}
-                        Some(InputResponse::Submitted) => {
-                            match _kind {
-                                EditingKind::Rename => {
-                                app.rename_file();
-                                }
-                            }
-                        }
+                                        match resp {
+                                            Some(InputResponse::StateChanged(_)) => {}
+                                            Some(InputResponse::Submitted) => {
+                                                if let EditingKind::Rename = _kind {
+                                                    app.rename_file();
+                                                }
+                                            }
 
-                        Some(InputResponse::Escaped) => {
-                            app.set_input_mode(InputMode::Normal);
-                        }
-                        None => {}
-                    }
-                                }
+                                            Some(InputResponse::Escaped) => {
+                                                app.set_input_mode(InputMode::Normal);
+                                            }
+                                            None => {}
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -182,12 +182,29 @@ fn start_key_events() -> tokio::sync::mpsc::Receiver<Event<KeyEvent>> {
 #[derive(Copy, Clone, Debug)]
 enum EditingKind {
     Rename,
+    Copy,
 }
 
 #[derive(Copy, Clone, Debug)]
 enum InputMode {
     Normal,
     Editing(EditingKind),
+}
+
+impl InputMode {
+    fn is_copy(&self) -> bool {
+        match *self {
+            InputMode::Editing(EditingKind::Copy) => true,
+            _ => false,
+        }
+    }
+
+    fn is_renaming(&self) -> bool {
+        match *self {
+            InputMode::Editing(EditingKind::Rename) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -220,7 +237,7 @@ impl Default for State {
 #[derive(Clone, Debug)]
 struct Item {
     name: String,
-    size: usize,
+    size: u64,
     perms: String,
     modified_date: DateTime<Local>,
     is_dir: bool,
@@ -248,7 +265,7 @@ impl Item {
         self
     }
 
-    fn with_size(mut self, size: usize) -> Self {
+    fn with_size(mut self, size: u64) -> Self {
         self.size = size;
         self
     }
@@ -408,6 +425,17 @@ impl App {
         self.state.directory_table_state.select(Some(0));
         self.load_dir();
     }
+
+    fn initiate_file_copy(&mut self) {
+        self.state.is_editing = true;
+        if let Some(idx) = self.state.directory_table_state.selected() {
+            if let Some(selected_item) = self.state.current_contents.get(idx) {
+                let path = Path::new(&selected_item.name);
+                self.state.file_to_edit = selected_item.clone();
+                self.state.input_mode = InputMode::Editing(EditingKind::Copy);
+            }
+        }
+    }
 }
 
 fn get_contents(path: &str) -> Result<Vec<Item>> {
@@ -420,7 +448,18 @@ fn get_contents(path: &str) -> Result<Vec<Item>> {
         .sort_by_file_name()
         .max_depth(1)
         .into_iter()
-        .map(|f| Item::new().with_name(&f.unwrap().path().display().to_string()))
+        .map(|ref f| {
+            let perms = format!(
+                "{:o}",
+                f.as_ref().unwrap().metadata().unwrap().permissions().mode()
+            );
+            let perms_octal: u32 = u32::from_str_radix(&perms, 8).unwrap();
+
+            Item::new()
+                .with_name(&(f.as_ref().unwrap().path().display().to_string()))
+                .with_size(f.as_ref().unwrap().metadata().unwrap().len())
+                .with_perms(&unix_mode::to_string(perms_octal))
+        })
         .skip(1)
         .collect();
     Ok(contents)
@@ -455,22 +494,53 @@ fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) -> Result<()> {
     let rows: Vec<_> = app
         .current_contents()
         .iter()
-        .map(|f| Row::new(vec![Cell::from(Span::raw(f.name.to_string()))]))
+        .map(|f| -> Row {
+            Row::new(vec![
+                Cell::from(Span::raw(f.name.to_string())),
+                Cell::from(Span::raw(f.perms.to_string())),
+                Cell::from(Span::raw(
+                    f.size.file_size(options::DECIMAL).unwrap_or_default(),
+                )),
+            ])
+        })
         .collect();
 
+    let body_chunks = if app.input_mode().is_copy() {
+        Layout::default()
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+            .direction(Direction::Horizontal)
+            // .margin(1)
+            .split(chunks[1])
+    } else {
+        Layout::default()
+            .constraints([Constraint::Percentage(100)].as_ref())
+            // .margin(1)
+            .split(chunks[1])
+    };
+
     let file_table = Table::new(rows)
-        .widths(&[Constraint::Percentage(100)])
+        .widths(&[
+            Constraint::Percentage(75),
+            Constraint::Percentage(12),
+            Constraint::Percentage(12),
+        ])
+        .column_spacing(10)
         .highlight_style(
             Style::default()
-                .bg(Color::Green)
-                .fg(Color::Black)
+                .fg(Color::Rgb(0, 0, 0))
+                .bg(Color::Rgb(0, 125, 255))
                 .add_modifier(Modifier::BOLD),
         );
-    f.render_stateful_widget(file_table, chunks[1], app.directory_table_state_mut());
+    f.render_stateful_widget(file_table, body_chunks[0], app.directory_table_state_mut());
+    if app.input_mode().is_copy() {
+        let block = Block::default().borders(Borders::ALL).title("Graphs");
+        f.render_widget(block, body_chunks[1]);
+    }
+    // f.render_stateful_widget(file_table, body_chunks[1], app.directory_table_state_mut());
 
     let width = chunks[0].width.max(3) - 3; // keep 2 for borders and 1 for cursor
     let scroll = (app.text_input().cursor() as u16).max(width) - width;
-    if app.is_editing() {
+    if app.input_mode().is_renaming() {
         // let text = vec![Spans::from(app.file_to_edit.clone())];
         let input = Paragraph::new(app.text_input().value())
             .style(match app.input_mode() {
@@ -500,11 +570,7 @@ fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) -> Result<()> {
     }
 
     match app.input_mode() {
-        InputMode::Normal =>
-            // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
-            {}
-
-        InputMode::Editing(_) => {
+        InputMode::Editing(EditingKind::Rename) => {
             // Make the cursor visible and ask tui-rs to put it at the specified coordinates after rendering
             f.set_cursor(
                 // Put cursor past the end of the input text
@@ -513,6 +579,8 @@ fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) -> Result<()> {
                 chunks[2].y + 1,
             )
         }
+        // Hide the cursor. `Frame` does this by default, so we don't need to do anything here
+        _ => {}
     }
     // match app.tabs.index {
     //     0 => draw_first_tab(f, app, chunks[1]),
