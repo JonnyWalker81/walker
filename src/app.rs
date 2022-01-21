@@ -148,7 +148,8 @@ impl App {
     }
 
     pub fn input_mode(&self) -> InputMode {
-        self.get_active_view().input_mode()
+        // self.get_active_view().input_mode()
+        self.main_panel().input_mode()
     }
 
     pub fn load_dir(&mut self) -> Result<()> {
@@ -156,17 +157,33 @@ impl App {
         Ok(())
     }
 
+    pub fn main_panel(&self) -> &WalkerView {
+        &self.state.main_view
+    }
+
+    pub fn action_panel(&self) -> &WalkerView {
+        &self.state.action_view
+    }
+
+    pub fn main_panel_mut(&mut self) -> &mut WalkerView {
+        &mut self.state.main_view
+    }
+
+    pub fn action_panel_mut(&mut self) -> &mut WalkerView {
+        &mut self.state.action_view
+    }
+
     fn get_active_view(&self) -> &WalkerView {
         match self.state.active_panel {
             PanelKind::Main => &self.state.main_view,
-            PanelKind::Secondary => &self.state.active_panel,
+            PanelKind::Secondary => &self.state.action_view,
         }
     }
 
     fn get_active_view_mut(&mut self) -> &mut WalkerView {
         match self.state.active_panel {
             PanelKind::Main => &mut self.state.main_view,
-            PanelKind::Secondary => &mut self.state.active_panel,
+            PanelKind::Secondary => &mut self.state.action_view,
         }
     }
 
@@ -192,6 +209,14 @@ impl App {
 
     pub fn set_input_mode(&mut self, input_mode: InputMode) {
         self.get_active_view_mut().set_input_mode(input_mode);
+        match input_mode {
+            InputMode::Normal => {
+                self.state.active_panel = PanelKind::Main;
+            }
+            _ => {
+                self.state.active_panel = PanelKind::Secondary;
+            }
+        }
     }
 
     pub fn rename_file(&mut self) {
@@ -200,6 +225,13 @@ impl App {
 
     pub fn initiate_file_copy(&mut self) {
         self.get_active_view_mut().initiate_file_copy();
+        self.state.active_panel = PanelKind::Secondary;
+        self.get_active_view_mut().initiate_file_copy();
+        let selected_dir = self
+            .main_panel()
+            .selected_item()
+            .map_or(String::new(), |i| i.name.clone());
+        self.action_panel_mut().set_current_dir(&selected_dir);
     }
 }
 

@@ -121,6 +121,10 @@ async fn run_ui() -> Result<()> {
                             InputMode::Editing(ref _kind) => {
                                 match event.code {
                                     KeyCode::Esc => app.set_input_mode(InputMode::Normal),
+                                    KeyCode::Down | KeyCode::Char('j') => app.move_selection_down(),
+                                    KeyCode::Up | KeyCode::Char('k') => app.move_selection_up(),
+                                    KeyCode::Right | KeyCode::Char('l') => app.move_into_child_dir(),
+                                    KeyCode::Left | KeyCode::Char('h') => app.move_upto_parent_dir(),
                                     _ => {
                                         let resp = input_backend::to_input_request(CEvent::Key(event))
                                         .and_then(|req| app.text_input_mut().handle(req));
@@ -195,7 +199,7 @@ fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) -> Result<()> {
             .as_ref(),
         )
         .split(f.size());
-    let titles = vec![app.current_dir().as_str()]
+    let titles = vec![app.main_panel_mut().current_dir().as_str()]
         .iter()
         .map(|t| {
             Spans::from(Span::styled(
@@ -211,6 +215,7 @@ fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) -> Result<()> {
     f.render_widget(tabs, chunks[0]);
 
     let rows: Vec<_> = app
+        .main_panel()
         .current_contents()
         .iter()
         .map(|f| -> Row {
@@ -250,10 +255,53 @@ fn draw<B: Backend>(f: &mut Frame<B>, app: &mut App) -> Result<()> {
                 .bg(Color::Rgb(0, 125, 255))
                 .add_modifier(Modifier::BOLD),
         );
-    f.render_stateful_widget(file_table, body_chunks[0], app.directory_table_state_mut());
+    // f.render_stateful_widget(file_table, body_chunks[0], app.directory_table_state_mut());
+    f.render_stateful_widget(
+        file_table,
+        body_chunks[0],
+        app.main_panel_mut().directory_table_state_mut(),
+    );
+
     if app.input_mode().is_copy() {
-        let block = Block::default().borders(Borders::ALL).title("Graphs");
-        f.render_widget(block, body_chunks[1]);
+        // let selected_dir = app
+        //     .main_panel()
+        //     .selected_item()
+        //     .map_or(String::new(), |i| i.name.clone());
+        // app.action_panel_mut().set_current_dir(&selected_dir);
+        let action_rows: Vec<_> = app
+            .action_panel()
+            .current_contents()
+            .iter()
+            .map(|f| -> Row {
+                Row::new(vec![
+                    Cell::from(Span::raw(f.name.to_string())),
+                    Cell::from(Span::raw(f.perms.to_string())),
+                    Cell::from(Span::raw(
+                        f.size.file_size(options::DECIMAL).unwrap_or_default(),
+                    )),
+                ])
+            })
+            .collect();
+
+        let action_table = Table::new(action_rows)
+            .widths(&[
+                Constraint::Percentage(75),
+                Constraint::Percentage(12),
+                Constraint::Percentage(12),
+            ])
+            .column_spacing(10)
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Rgb(0, 0, 0))
+                    .bg(Color::Rgb(0, 125, 255))
+                    .add_modifier(Modifier::BOLD),
+            );
+
+        f.render_stateful_widget(
+            action_table,
+            body_chunks[1],
+            app.action_panel_mut().directory_table_state_mut(),
+        );
     }
     // f.render_stateful_widget(file_table, body_chunks[1], app.directory_table_state_mut());
 

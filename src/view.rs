@@ -39,9 +39,9 @@ pub struct WalkerView {
 
 impl Default for WalkerView {
     fn default() -> Self {
-        Self {
-            state: WalkerState::default(),
-        }
+        let mut s = WalkerState::default();
+        s.directory_table_state.select(Some(0));
+        Self { state: s }
     }
 }
 
@@ -51,9 +51,16 @@ impl WalkerView {
     }
 
     pub fn set_current_dir(&mut self, dir: &str) {
-        let path = Path::new(dir);
-        if path.is_dir() {
-            self.state.current_dir = dir.to_string();
+        if self.state.current_dir != dir {
+            let path = Path::new(dir);
+            if path.is_dir() {
+                self.state.current_dir = dir.to_string();
+            } else {
+                let parent_dir = path
+                    .parent()
+                    .map_or(String::new(), |p| p.display().to_string());
+                self.state.current_dir = parent_dir.to_string();
+            }
             self.load_dir();
         }
     }
@@ -148,19 +155,27 @@ impl WalkerView {
         }
     }
 
-    pub fn start_rename_file(&mut self) {
-        self.state.is_editing = true;
+    pub fn selected_item(&self) -> Option<&Item> {
         if let Some(idx) = self.state.directory_table_state.selected() {
             if let Some(selected_item) = self.state.current_contents.get(idx) {
-                let path = Path::new(&selected_item.name);
-                self.state.file_to_edit = selected_item.clone();
-                self.state.input_mode = InputMode::Editing(EditingKind::Rename);
-                self.state.text_input = self
-                    .state
-                    .text_input
-                    .clone()
-                    .with_value(self.state.file_to_edit.name.clone());
+                return Some(selected_item);
             }
+        }
+
+        None
+    }
+
+    pub fn start_rename_file(&mut self) {
+        self.state.is_editing = true;
+        if let Some(selected_item) = self.selected_item() {
+            let path = Path::new(&selected_item.name);
+            self.state.file_to_edit = selected_item.clone();
+            self.state.input_mode = InputMode::Editing(EditingKind::Rename);
+            self.state.text_input = self
+                .state
+                .text_input
+                .clone()
+                .with_value(self.state.file_to_edit.name.clone());
         }
     }
 
