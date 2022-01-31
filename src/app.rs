@@ -19,7 +19,7 @@ pub enum InputMode {
     Editing(EditingKind),
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PanelKind {
     Main,
     Secondary,
@@ -232,6 +232,18 @@ impl App {
             .selected_item()
             .map_or(String::new(), |i| i.name.clone());
         self.action_panel_mut().set_current_dir(&selected_dir);
+    }
+
+    pub fn delete_file(&mut self) -> Result<()> {
+        if self.state.active_panel == PanelKind::Main {
+            if let Some(f) = self.state.main_view.selected_item() {
+                let full_path = Path::new(&self.state.main_view.current_dir()).join(&f.name);
+                std::fs::remove_file(full_path)?;
+                self.load_dir()?;
+            }
+        }
+
+        Ok(())
     }
 }
 

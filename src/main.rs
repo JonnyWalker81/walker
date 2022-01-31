@@ -115,6 +115,7 @@ async fn run_ui() -> Result<()> {
                                     KeyCode::Left | KeyCode::Char('h') => app.move_upto_parent_dir(),
                                     KeyCode::Char('r') => app.start_rename_file(),
                                     KeyCode::Char('y') => app.initiate_file_copy(),
+                                    KeyCode::Char('x') => app.delete_file(),
                                     _ => {}
                                 }
                             }
